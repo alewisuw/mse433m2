@@ -1,6 +1,6 @@
 # Hospital Staffing Optimization
 
-A discrete-time (hourly) hospital staffing decision system with two modes: a **greedy heuristic** (stochastic simulation) and a **MIP optimizer** (deterministic look-ahead). Both modes minimize total cost while prioritizing patient survival. Only ambulance patients can be diverted. The budget is a hard cap on controllable spending (nurses + diversions); the death penalty is an uncontrollable cost used to ensure the optimizer avoids deaths.
+A discrete-time (hourly) hospital staffing decision system with two modes: a **greedy heuristic** (stochastic simulation) and a **MIP optimizer** (deterministic look-ahead). Both modes minimize total cost while prioritizing patient survival. Only ambulance patients can be diverted. Only treated patients (those assigned a nurse) are eligible for discharge. The budget is a hard cap on controllable spending (nurses + diversions); if starting nurse payroll exceeds the budget, the run is infeasible. The death penalty is an uncontrollable cost used to ensure the optimizer avoids deaths.
 
 ## Two Modes
 
@@ -35,7 +35,7 @@ Multi-period Mixed Integer Program (MIP) solved with PuLP/CBC. Looks ahead acros
 | $\bar{d}$ | Expected departures per hour (mean of `departures.csv`) |
 | $R$ | Maximum room capacity (default 88) |
 | $B$ | Hourly budget cap on controllable spending (optional) |
-| $P_0$ | Initial patients (default 55) |
+| $P_0$ | Starting occupancy — patients already in hospital (default 55) |
 | $N_0$ | Initial nurses (default 55) |
 
 ### Decision Variables
@@ -69,9 +69,9 @@ For each hour $t = 0, \ldots, T-1$:
 
 $$v_t \leq \bar{a}_t$$
 
-**Departures** — cannot exceed expected rate or available patients:
+**Departures** — cannot exceed expected rate, and only treated patients (those with a nurse last hour) can depart:
 
-$$\text{dep}_t \leq \bar{d}, \qquad \text{dep}_t \leq p_{t-1}$$
+$$\text{dep}_t \leq \bar{d}, \qquad \text{dep}_t \leq p_{t-1} - 0.9 \cdot w_{t-1}$$
 
 **Patient flow** — active patients after arrivals, departures, and diversions:
 
@@ -85,9 +85,9 @@ $$x_t \leq R$$
 
 $$n_t = n_{t-1} + h_t$$
 
-**Waiting patients** — those without a nurse:
+**Waiting patients** — those without a nurse (max constraint):
 
-$$w_t \geq x_t - n_t$$
+$$w_t = \max(0, x_t - n_t)$$
 
 **End-of-hour patients** — 10% of waiting patients die:
 
@@ -101,7 +101,7 @@ $$c_n \cdot n_t + c_d \cdot v_t \leq B$$
 
 $$h_t, v_t, n_t \in \mathbb{Z}_{\geq 0}, \qquad p_t, x_t, w_t, \text{dep}_t \geq 0$$
 
-**Initial conditions**: $p_{-1} = P_0$, $n_{-1} = N_0$
+**Initial conditions**: $p_{-1} = P_0$, $n_{-1} = N_0$, $w_{-1} = \max(0, P_0 - N_0)$
 
 ## Data
 
@@ -136,7 +136,7 @@ python hospital_simulation.py --help
 | `--nurse-cost` | 150 | Cost per nurse per hour ($c_n$, all nurses, not just new hires) |
 | `--diversion-cost` | 1000 | Cost per diverted ambulance patient ($c_d$) |
 | `--death-cost` | 10000000 | Penalty per patient death ($c_\delta$, not counted against budget) |
-| `--initial-patients` | 55 | Starting patient count ($P_0$) |
+| `--starting-occupancy` | 55 | Starting occupancy — patients already in hospital ($P_0$) |
 | `--initial-nurses` | 55 | Starting nurse count ($N_0$) |
 | `--max-rooms` | 88 | Hospital room capacity ($R$) |
 | `--hours` | 24 | Number of hours to run ($T$) |

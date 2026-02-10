@@ -5,18 +5,17 @@ Problem:
 - Discrete time: 1-hour intervals
 - 1:1 nurse-to-patient ratio required
 - Nurses are interchangeable
-- Patients cannot wait without nurses
+- Patients without a nurse wait and face a 10% death risk per hour
+- Only treated patients (those assigned a nurse) are eligible for discharge
 
 Costs:
 - Nurse hiring: $150 per nurse per hour
 - Patient diversion: $1,000 per patient
-- Patient death: $10,000,000 per patient (10% chance per hour in hospital)
+- Patient death: $10,000,000 per patient (10% of waiting patients die each hour)
 
 Objective:
-Minimize total hourly cost subject to constraint that nurses >= patients
-
-Note: Deaths only occur for patients waiting WITHOUT a nurse. Patients in the hospital
-with nurses (1:1 ratio maintained) do not die.
+Minimize total cost while prioritizing patient survival through staffing and diversion decisions.
+Nurses >= patients is NOT a hard constraint; uncovered patients wait and risk death.
 """
 
 import pandas as pd
@@ -27,7 +26,7 @@ from pulp import LpProblem, LpMinimize, LpVariable, lpSum, PULP_CBC_CMD, LpStatu
 
 
 def optimal_staffing_decision(current_patients, arrivals, departures, current_nurses, 
-                             ambulance_arrivals=0, waiting_queue=0, max_rooms=88, 
+                             ambulance_arrivals=0, max_rooms=88, 
                              nurse_cost=150, diversion_cost=1000, death_cost=10000000,
                              budget=None):
     """
@@ -51,7 +50,6 @@ def optimal_staffing_decision(current_patients, arrivals, departures, current_nu
         departures: patients leaving this hour
         current_nurses: nurses currently staffed
         ambulance_arrivals: ambulance arrivals this hour (only these can be diverted)
-        waiting_queue: patients waiting without a nurse from previous hours
         max_rooms: maximum room capacity (default 88)
         nurse_cost: cost per nurse per hour (default 150)
         diversion_cost: cost per diverted patient (default 1000)
@@ -88,9 +86,17 @@ def optimal_staffing_decision(current_patients, arrivals, departures, current_nu
         remaining_budget = budget - base_nurse_cost
         
         if remaining_budget < 0:
-            # Can't even afford existing nurses — no hiring, no diversion
-            # All uncovered patients wait
-            remaining_budget = 0
+            # Infeasible: can't afford existing nurses
+            return {
+                'status': 'INFEASIBLE',
+                'reason': 'Starting nurse payroll exceeds budget',
+                'hire_nurses': 0,
+                'divert_patients': 0,
+                'waiting': None,
+                'actual_deaths': None,
+                'active_patients': None,
+                'total_cost': None
+            }
         
         # 4a: Hire as many nurses as budget allows
         if nurses_needed > 0 and remaining_budget > 0:
@@ -142,6 +148,7 @@ def optimal_staffing_decision(current_patients, arrivals, departures, current_nu
     total_cost = total_nurse_cost + total_diversion_cost + total_death_cost
     
     return {
+        'status': 'OK',
         'hire_nurses': hire_nurses,
         'divert_patients': divert_patients,
         'waiting': waiting,
@@ -151,7 +158,7 @@ def optimal_staffing_decision(current_patients, arrivals, departures, current_nu
     }
 
 
-def optimize_staffing(hours, initial_patients, initial_nurses, arrivals_per_hour,
+def optimize_staffing(hours, initial_occupancy, initial_nurses, arrivals_per_hour,
                       ambulance_per_hour, expected_departures, max_rooms, nurse_cost,
                       diversion_cost, death_cost, budget=None):
     """
@@ -194,19 +201,21 @@ def optimize_staffing(hours, initial_patients, initial_nurses, arrivals_per_hour
     w = [LpVariable(f"waiting_{t}", lowBound=0) for t in range(T)]
     active = [LpVariable(f"active_{t}", lowBound=0) for t in range(T)]
     dep = [LpVariable(f"dep_{t}", lowBound=0) for t in range(T)]
+    no_wait = [LpVariable(f"no_wait_{t}", cat='Binary') for t in range(T)]
     
     for t in range(T):
-        p_prev = initial_patients if t == 0 else p[t - 1]
+        p_prev = initial_occupancy if t == 0 else p[t - 1]
         n_prev = initial_nurses if t == 0 else n[t - 1]
+        w_prev = max(0, initial_occupancy - initial_nurses) if t == 0 else w[t - 1]
         a_t = arrivals_per_hour[t] if t < len(arrivals_per_hour) else 0
         amb_t = ambulance_per_hour[t] if t < len(ambulance_per_hour) else 0
         
         # Diversions: can only divert ambulance patients
         prob += div[t] <= amb_t
         
-        # Departures: can't exceed expected rate or available patients
+        # Departures: can't exceed expected rate; only treated patients can depart
         prob += dep[t] <= d_exp
-        prob += dep[t] <= p_prev
+        prob += dep[t] <= p_prev - 0.9 * w_prev
         
         # Active patients = previous - departures + arrivals - diversions
         prob += active[t] == p_prev - dep[t] + a_t - div[t]
@@ -217,8 +226,10 @@ def optimize_staffing(hours, initial_patients, initial_nurses, arrivals_per_hour
         # Nurse staffing (can only hire, never fire)
         prob += n[t] == n_prev + h[t]
         
-        # Waiting = uncovered patients (active - nurses, but >= 0)
+        # Waiting = max(0, active - nurses)
         prob += w[t] >= active[t] - n[t]
+        prob += w[t] <= active[t] - n[t] + max_rooms * no_wait[t]
+        prob += w[t] <= max_rooms * (1 - no_wait[t])
         
         # End-of-hour patients: deaths remove 10% of waiting
         prob += p[t] == active[t] - 0.1 * w[t]
@@ -294,9 +305,9 @@ def optimize_staffing(hours, initial_patients, initial_nurses, arrivals_per_hour
 class HospitalSimulation:
     """Simulation of hospital operations over multiple hours"""
     
-    def __init__(self, initial_patients=55, initial_nurses=55, budget=None, max_rooms=88,
+    def __init__(self, initial_occupancy=55, initial_nurses=55, budget=None, max_rooms=88,
                  nurse_cost=150, diversion_cost=1000, death_cost=10000000):
-        self.current_patients = initial_patients
+        self.current_patients = initial_occupancy
         self.current_nurses = initial_nurses
         self.budget = budget
         self.max_rooms = max_rooms
@@ -336,17 +347,52 @@ class HospitalSimulation:
     
     def simulate_hour(self, hour):
         """Simulate one hour of operations"""
+        if self.budget is not None:
+            base_nurse_cost = self.current_nurses * self.nurse_cost
+            if base_nurse_cost > self.budget:
+                return {
+                    'status': 'INFEASIBLE',
+                    'reason': 'Starting nurse payroll exceeds budget',
+                    'hour': hour,
+                    'arrivals': 0,
+                    'departures': 0,
+                    'current_patients_end': self.current_patients,
+                    'current_nurses': self.current_nurses,
+                    'hire_nurses': 0,
+                    'divert_patients': 0,
+                    'waiting_queue': self.waiting_queue,
+                    'actual_deaths': 0,
+                    'hourly_cost': 0,
+                    'cumulative_cost': self.cumulative_cost
+                }
         # Get inputs for this hour
         arrivals, ambulance_arrivals = self.get_arrivals(hour)
-        departures = min(self.get_departures(), self.current_patients)
+        treated_patients = max(0, self.current_patients - self.waiting_queue)
+        departures = min(self.get_departures(), treated_patients)
         
         # Make optimal decision (single unified function handles budget or unlimited)
         result = optimal_staffing_decision(
             self.current_patients, arrivals, departures, 
-            self.current_nurses, ambulance_arrivals, self.waiting_queue, self.max_rooms,
+            self.current_nurses, ambulance_arrivals, self.max_rooms,
             self.nurse_cost, self.diversion_cost, self.death_cost,
             self.budget
         )
+        if result.get('status') == 'INFEASIBLE':
+            return {
+                'status': 'INFEASIBLE',
+                'reason': result.get('reason', 'Infeasible'),
+                'hour': hour,
+                'arrivals': arrivals,
+                'departures': departures,
+                'current_patients_end': self.current_patients,
+                'current_nurses': self.current_nurses,
+                'hire_nurses': 0,
+                'divert_patients': 0,
+                'waiting_queue': self.waiting_queue,
+                'actual_deaths': 0,
+                'hourly_cost': 0,
+                'cumulative_cost': self.cumulative_cost
+            }
         
         # Update state
         self.current_nurses += result['hire_nurses']
@@ -356,6 +402,7 @@ class HospitalSimulation:
         
         # Record this hour
         record = {
+            'status': result.get('status', 'OK'),
             'hour': hour,
             'arrivals': arrivals,
             'departures': departures,
@@ -387,6 +434,12 @@ class HospitalSimulation:
         
         for hour in range(hours):
             record = self.simulate_hour(hour)
+            if record.get('status') == 'INFEASIBLE':
+                print(f"{hour:4d} | {'-':>4} | {'-':>4} | {record['current_patients_end']:8d} | "
+                    f"{record['current_nurses']:7d} | {'-':>4} | {'-':>6} | "
+                    f"{record['waiting_queue']:5d} | {'-':>6} | {'-':>12} | {'-':>14}")
+                print("\nINFEASIBLE: starting nurse payroll exceeds budget.")
+                return
             print(f"{hour:4d} | {record['arrivals']:4d} | {record['departures']:4d} | "
                   f"{record['current_patients_end']:8d} | {record['current_nurses']:7d} | "
                   f"{record['hire_nurses']:4d} | {record['divert_patients']:6d} | "
@@ -441,7 +494,7 @@ class HospitalSimulation:
         
         result = optimize_staffing(
             hours=hours,
-            initial_patients=self.current_patients,
+            initial_occupancy=self.current_patients,
             initial_nurses=self.current_nurses,
             arrivals_per_hour=arrivals_per_hour,
             ambulance_per_hour=ambulance_per_hour,
@@ -495,8 +548,8 @@ if __name__ == "__main__":
                         help='greedy = hour-by-hour heuristic (stochastic), optimize = MIP look-ahead (deterministic expected values). Default: greedy')
     parser.add_argument('--budget', type=float, default=None, 
                         help='Hard cap on total controllable spending per hour: nurses + diversions (default: None = unlimited)')
-    parser.add_argument('--initial-patients', type=int, default=55,
-                        help='Initial number of patients (default: 55)')
+    parser.add_argument('--starting-occupancy', type=int, default=55,
+                        help='Starting occupancy — patients already in hospital (default: 55)')
     parser.add_argument('--initial-nurses', type=int, default=55,
                         help='Initial number of nurses (default: 55)')
     parser.add_argument('--max-rooms', type=int, default=88,
@@ -513,7 +566,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     sim = HospitalSimulation(
-        initial_patients=args.initial_patients,
+        initial_occupancy=args.starting_occupancy,
         initial_nurses=args.initial_nurses,
         budget=args.budget,
         max_rooms=args.max_rooms,
