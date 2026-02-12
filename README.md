@@ -57,9 +57,9 @@ Multi-period Mixed Integer Program (MIP) solved with PuLP/CBC. Looks ahead acros
 
 ### Objective
 
-$$\min \sum_{t=0}^{T-1} \Big( c_n \cdot n_t + c_d \cdot v_t + c_\delta \cdot 0.1 \cdot w_t \Big)$$
+$$\min \sum_{t=0}^{T-1} \Big( c_n \cdot n_t + c_d \cdot v_t + c_\delta \cdot \rho \cdot w_t \Big)$$
 
-The death penalty term $c_\delta \cdot 0.1 \cdot w_t$ represents the expected cost of deaths (10% of waiting patients die each hour). This large penalty ensures the optimizer avoids letting patients wait without nurses.
+The death penalty term $c_\delta \cdot \rho \cdot w_t$ represents the expected cost of deaths ($\rho$ of waiting patients die each hour). This large penalty ensures the optimizer avoids letting patients wait without nurses.
 
 ### Constraints
 
@@ -89,9 +89,9 @@ $$n_t = n_{t-1} + h_t$$
 
 $$w_t = \max(0, x_t - n_t)$$
 
-**End-of-hour patients** — 10% of waiting patients die:
+**End-of-hour patients** — $\rho$ of waiting patients die:
 
-$$p_t = x_t - 0.1 \cdot w_t$$
+$$p_t = x_t - \rho \cdot w_t$$
 
 **Budget constraint** (when budget $B$ is specified) — hard cap on controllable costs:
 
@@ -136,6 +136,7 @@ python hospital_simulation.py --help
 | `--nurse-cost` | 150 | Cost per nurse per hour ($c_n$, all nurses, not just new hires) |
 | `--diversion-cost` | 1000 | Cost per diverted ambulance patient ($c_d$) |
 | `--death-cost` | 10000000 | Penalty per patient death ($c_\delta$, not counted against budget) |
+| `--death-rate` | 0.1 | Per-hour death probability for waiting patients ($\rho$) |
 | `--starting-occupancy` | 55 | Starting occupancy — patients already in hospital ($P_0$) |
 | `--initial-nurses` | 55 | Starting nurse count ($N_0$) |
 | `--max-rooms` | 88 | Hospital room capacity ($R$) |

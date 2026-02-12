@@ -28,13 +28,13 @@ from pulp import LpProblem, LpMinimize, LpVariable, lpSum, PULP_CBC_CMD, LpStatu
 def optimal_staffing_decision(current_patients, arrivals, departures, current_nurses, 
                              ambulance_arrivals=0, max_rooms=88, 
                              nurse_cost=150, diversion_cost=1000, death_cost=10000000,
-                             budget=None):
+                             death_rate=0.1, budget=None):
     """
     Determine optimal staffing decisions for one hour.
     
     Budget is a HARD CAP on total controllable spending (nurses + diversions).
     If the budget is exhausted, remaining uncovered patients wait without a nurse
-    and face a 10% chance of dying each hour.
+    and face a death risk each hour (death_rate).
     
     Only ambulance patients can be diverted.
     
@@ -54,6 +54,7 @@ def optimal_staffing_decision(current_patients, arrivals, departures, current_nu
         nurse_cost: cost per nurse per hour (default 150)
         diversion_cost: cost per diverted patient (default 1000)
         death_cost: cost per patient death (default 10000000)
+        death_rate: per-hour death probability for waiting patients (default 0.1)
         budget: hard cap on controllable spending per hour (None = unlimited)
         
     Returns:
@@ -133,8 +134,8 @@ def optimal_staffing_decision(current_patients, arrivals, departures, current_nu
     # Active patients in hospital (includes waiting patients — they occupy rooms)
     active_patients = potential_patients - budget_divert
     
-    # Step 5: Deaths — only waiting patients (no nurse) face 10% death risk per hour
-    actual_deaths = sum(1 for _ in range(waiting) if random.random() < 0.1)
+    # Step 5: Deaths — only waiting patients (no nurse) face death risk per hour
+    actual_deaths = sum(1 for _ in range(waiting) if random.random() < death_rate)
     
     # Remove dead patients from active count and waiting
     active_patients -= actual_deaths
@@ -160,13 +161,13 @@ def optimal_staffing_decision(current_patients, arrivals, departures, current_nu
 
 def optimize_staffing(hours, initial_occupancy, initial_nurses, arrivals_per_hour,
                       ambulance_per_hour, expected_departures, max_rooms, nurse_cost,
-                      diversion_cost, death_cost, budget=None):
+                      diversion_cost, death_cost, death_rate=0.1, budget=None):
     """
     Solve a multi-period Mixed Integer Program (MIP) for globally optimal staffing.
     
     Uses expected values for stochastic elements:
       - Departures: mean of departure options (deterministic)
-      - Deaths: 10% of waiting patients (expected value, not random)
+    - Deaths: death_rate of waiting patients (expected value, not random)
     
     Decision variables per hour:
       - hire[t]: nurses to hire (integer >= 0)
@@ -180,7 +181,7 @@ def optimize_staffing(hours, initial_occupancy, initial_nurses, arrivals_per_hou
       - dep[t]: actual departures (min of expected departures, available patients)
     
     Objective: minimize total cost = Σ (nurse_cost × nurses + diversion_cost × divert
-                                        + death_cost × 0.1 × waiting)
+                                        + death_cost × death_rate × waiting)
     
     Returns:
         dict with 'status', 'total_cost', 'hourly_plan' (list of dicts per hour),
@@ -215,7 +216,7 @@ def optimize_staffing(hours, initial_occupancy, initial_nurses, arrivals_per_hou
         
         # Departures: can't exceed expected rate; only treated patients can depart
         prob += dep[t] <= d_exp
-        prob += dep[t] <= p_prev - 0.9 * w_prev
+        prob += dep[t] <= p_prev - (1 - death_rate) * w_prev
         
         # Active patients = previous - departures + arrivals - diversions
         prob += active[t] == p_prev - dep[t] + a_t - div[t]
@@ -232,7 +233,7 @@ def optimize_staffing(hours, initial_occupancy, initial_nurses, arrivals_per_hou
         prob += w[t] <= max_rooms * (1 - no_wait[t])
         
         # End-of-hour patients: deaths remove 10% of waiting
-        prob += p[t] == active[t] - 0.1 * w[t]
+        prob += p[t] == active[t] - death_rate * w[t]
         
         # Budget: hard cap on controllable spending (nurses + diversions)
         if budget is not None:
@@ -240,7 +241,7 @@ def optimize_staffing(hours, initial_occupancy, initial_nurses, arrivals_per_hou
     
     # Objective: minimize total cost across all hours
     prob += lpSum(
-        nurse_cost * n[t] + diversion_cost * div[t] + death_cost * 0.1 * w[t]
+        nurse_cost * n[t] + diversion_cost * div[t] + death_cost * death_rate * w[t]
         for t in range(T)
     )
     
@@ -263,7 +264,7 @@ def optimize_staffing(hours, initial_occupancy, initial_nurses, arrivals_per_hou
         div_val = div[t].varValue
         w_val = w[t].varValue
         p_val = p[t].varValue
-        expected_deaths = 0.1 * w_val
+        expected_deaths = death_rate * w_val
         
         hourly_cost = nurse_cost * n_val + diversion_cost * div_val + death_cost * expected_deaths
         cumulative_cost += hourly_cost
@@ -306,7 +307,7 @@ class HospitalSimulation:
     """Simulation of hospital operations over multiple hours"""
     
     def __init__(self, initial_occupancy=55, initial_nurses=55, budget=None, max_rooms=88,
-                 nurse_cost=150, diversion_cost=1000, death_cost=10000000):
+                 nurse_cost=150, diversion_cost=1000, death_cost=10000000, death_rate=0.1):
         self.current_patients = initial_occupancy
         self.current_nurses = initial_nurses
         self.budget = budget
@@ -314,6 +315,7 @@ class HospitalSimulation:
         self.nurse_cost = nurse_cost
         self.diversion_cost = diversion_cost
         self.death_cost = death_cost
+        self.death_rate = death_rate
         self.waiting_queue = 0  # patients in hospital without a nurse
         self.cumulative_cost = 0
         self.hourly_records = []
@@ -375,6 +377,7 @@ class HospitalSimulation:
             self.current_patients, arrivals, departures, 
             self.current_nurses, ambulance_arrivals, self.max_rooms,
             self.nurse_cost, self.diversion_cost, self.death_cost,
+            self.death_rate,
             self.budget
         )
         if result.get('status') == 'INFEASIBLE':
@@ -426,7 +429,7 @@ class HospitalSimulation:
         print("="*130)
         print(f"Initial State: {self.current_patients} patients, {self.current_nurses} nurses, {self.max_rooms} total rooms")
         if self.budget is not None:
-            print(f"Hourly Budget: ${self.budget:,.0f}  |  Nurse: ${self.nurse_cost:,.0f}/hr  |  Diversion: ${self.diversion_cost:,.0f}  |  Death: ${self.death_cost:,.0f}")
+            print(f"Hourly Budget: ${self.budget:,.0f}  |  Nurse: ${self.nurse_cost:,.0f}/hr  |  Diversion: ${self.diversion_cost:,.0f}  |  Death: ${self.death_cost:,.0f}  |  Death Rate: {self.death_rate:.0%}")
         print("="*130)
         print(f"{'Hour':>4} | {'Arr':>4} | {'Dep':>4} | {'Patients':>8} | {'Nurses':>7} | "
               f"{'Hire':>4} | {'Divert':>6} | {'Queue':>5} | {'Deaths':>6} | {'Cost':>12} | {'Cumul.$':>14}")
@@ -485,11 +488,11 @@ class HospitalSimulation:
         print("HOSPITAL STAFFING OPTIMIZATION — MIP MODEL (deterministic, expected values)")
         print("="*130)
         print(f"Initial State: {self.current_patients} patients, {self.current_nurses} nurses, {self.max_rooms} total rooms")
-        print(f"Expected Departures/hr: {expected_departures:.1f}  |  Death Rate: 10% of waiting patients (expected)")
+        print(f"Expected Departures/hr: {expected_departures:.1f}  |  Death Rate: {self.death_rate:.0%} of waiting patients (expected)")
         if self.budget is not None:
-            print(f"Hourly Budget: ${self.budget:,.0f}  |  Nurse: ${self.nurse_cost:,.0f}/hr  |  Diversion: ${self.diversion_cost:,.0f}  |  Death: ${self.death_cost:,.0f}")
+            print(f"Hourly Budget: ${self.budget:,.0f}  |  Nurse: ${self.nurse_cost:,.0f}/hr  |  Diversion: ${self.diversion_cost:,.0f}  |  Death: ${self.death_cost:,.0f}  |  Death Rate: {self.death_rate:.0%}")
         else:
-            print(f"Budget: Unlimited  |  Nurse: ${self.nurse_cost:,.0f}/hr  |  Diversion: ${self.diversion_cost:,.0f}  |  Death: ${self.death_cost:,.0f}")
+            print(f"Budget: Unlimited  |  Nurse: ${self.nurse_cost:,.0f}/hr  |  Diversion: ${self.diversion_cost:,.0f}  |  Death: ${self.death_cost:,.0f}  |  Death Rate: {self.death_rate:.0%}")
         print("="*130)
         
         result = optimize_staffing(
@@ -503,6 +506,7 @@ class HospitalSimulation:
             nurse_cost=self.nurse_cost,
             diversion_cost=self.diversion_cost,
             death_cost=self.death_cost,
+            death_rate=self.death_rate,
             budget=self.budget
         )
         
@@ -562,6 +566,8 @@ if __name__ == "__main__":
                         help='Cost per diverted patient (default: 1000)')
     parser.add_argument('--death-cost', type=float, default=10000000,
                         help='Cost per patient death (default: 10000000)')
+    parser.add_argument('--death-rate', type=float, default=0.1,
+                        help='Per-hour death probability for waiting patients (default: 0.1)')
     
     args = parser.parse_args()
     
@@ -572,7 +578,8 @@ if __name__ == "__main__":
         max_rooms=args.max_rooms,
         nurse_cost=args.nurse_cost,
         diversion_cost=args.diversion_cost,
-        death_cost=args.death_cost
+        death_cost=args.death_cost,
+        death_rate=args.death_rate
     )
     
     if args.mode == 'optimize':
