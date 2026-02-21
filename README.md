@@ -71,7 +71,7 @@ $$v_t \leq \bar{a}_t$$
 
 **Departures** — cannot exceed expected rate, and only treated patients (those with a nurse last hour) can depart:
 
-$$\text{dep}_t \leq \bar{d}, \qquad \text{dep}_t \leq p_{t-1} - 0.9 \cdot w_{t-1}$$
+$$\text{dep}_t \leq \bar{d}, \qquad \text{dep}_t \leq p_{t-1} - (1-\rho) \cdot w_{t-1}$$
 
 **Patient flow** — active patients after arrivals, departures, and diversions:
 
@@ -109,10 +109,11 @@ $$h_t, v_t, n_t \in \mathbb{Z}_{\geq 0}, \qquad p_t, x_t, w_t, \text{dep}_t \geq
 - **`departures.csv`** — single column "Leaving" with historical departure counts (randomly sampled in greedy mode, averaged in optimize mode)
 
 ## Usage
+```bash
+pip install -r requirements.txt
+```
 
 ```bash
-# Greedy mode (default), unlimited budget
-python hospital_simulation.py
 
 # Greedy mode with budget
 python hospital_simulation.py --mode greedy --budget 15000
@@ -126,6 +127,38 @@ python hospital_simulation.py --mode optimize --budget 12000 --nurse-cost 200 --
 # All options
 python hospital_simulation.py --help
 ```
+
+```bash
+# Compare greedy vs optimal (default parameters)
+python compare_approaches.py
+
+# Custom budget and cost assumptions
+python compare_approaches.py --budget 12000 --nurse-cost 175 --diversion-cost 1500
+
+# Sweep over a custom set of room counts and occupancies
+python compare_approaches.py --rooms 60 80 100 --occupancy 30 50 70
+
+# Headless mode — saves plots without opening windows
+python compare_approaches.py --no-show
+
+# All options
+python compare_approaches.py --help
+```
+
+### `compare_approaches.py` Parameters
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--budget` | 15000 | Hourly budget cap on controllable spending (nurses + diversions) |
+| `--hours` | 24 | Number of simulation hours |
+| `--greedy-runs` | 5 | Greedy runs to average per scenario (greedy is stochastic) |
+| `--nurse-cost` | 150 | Cost per nurse per hour ($c_n$) |
+| `--diversion-cost` | 1000 | Cost per diverted ambulance patient ($c_d$) |
+| `--death-cost` | 10000000 | Penalty per expected patient death ($c_\delta$, not charged against budget) |
+| `--death-rate` | 0.1 | Per-hour death probability for waiting patients ($\rho$) |
+| `--rooms` | 50 60 70 80 88 100 120 | Space-separated list of max-room values to sweep |
+| `--occupancy` | 20 30 40 50 55 60 70 | Space-separated list of starting-occupancy values to sweep |
+| `--no-show` | false | Save plots to disk without displaying them (headless/CI mode) |
 
 ### Parameters
 
